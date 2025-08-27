@@ -1,0 +1,246 @@
+---
+title: "Yellow Fever Manuscript Analysis"
+author: "Kacie Ring"
+date: "2025-01-06"
+output: html_document
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Load required libraries
+library(tidyverse)
+library(sf)
+library(ggplot2)
+library(patchwork)
+library(rnaturalearth)
+library(stringr)
+```
+
+```{r load_data}
+# Load Yellow Fever data
+brazil_data <- read_csv("data/YF_data_for_mapping_Brazil.csv")
+colombia_data <- read_csv("data/YF_data_for_mapping_Colombia.csv")
+peru_data <- read_csv("data/YF_data_for_mapping_Peru.csv")
+
+# Load administrative boundaries
+brazil_shp <- st_read("data/municipios_2010_EPSG3857.shp", quiet = TRUE)
+colombia_shp <- st_read("data/MGN_MPIO_POLITICO_2018_EPSG3857.shp", quiet = TRUE)
+peru_shp <- st_read("data/per_admbnda_adm3_2018_EPSG3857.shp", quiet = TRUE)
+```
+
+```{r process_data}
+# Process Yellow Fever data
+yf_cols_brazil <- grep("Yellow_Fever_YN", names(brazil_data), value = TRUE)
+yf_cols_colombia <- grep("Yellow_Fever_YN", names(colombia_data), value = TRUE)
+yf_cols_peru <- grep("Yellow_Fever_YN", names(peru_data), value = TRUE)
+
+# Brazil data processing
+brazil_data_filtered <- brazil_data[rowSums(!is.na(brazil_data[, yf_cols_brazil])) > 0, ]
+brazil_data_filtered$cumulative_yf <- rowSums(brazil_data_filtered[, yf_cols_brazil], na.rm = TRUE)
+brazil_data_filtered$yf_binary <- ifelse(brazil_data_filtered$cumulative_yf > 0, 1, 0)
+
+# Colombia data processing
+colombia_data_filtered <- colombia_data[rowSums(!is.na(colombia_data[, yf_cols_colombia])) > 0, ]
+colombia_data_filtered$cumulative_yf <- rowSums(colombia_data_filtered[, yf_cols_colombia], na.rm = TRUE)
+colombia_data_filtered$yf_binary <- ifelse(colombia_data_filtered$cumulative_yf > 0, 1, 0)
+
+# Peru data processing
+peru_data_filtered <- peru_data[rowSums(!is.na(peru_data[, yf_cols_peru])) > 0, ]
+peru_data_filtered$cumulative_yf <- rowSums(peru_data_filtered[, yf_cols_peru], na.rm = TRUE)
+peru_data_filtered$yf_binary <- ifelse(peru_data_filtered$cumulative_yf > 0, 1, 0)
+peru_data_filtered$Code <- str_pad(peru_data_filtered$Code, width = 6, side = "left", pad = "0")
+
+# Ensure join columns are character type
+brazil_data_filtered$Code <- as.character(brazil_data_filtered$Code)
+colombia_data_filtered$Code <- as.character(colombia_data_filtered$Code)
+peru_data_filtered$Code <- as.character(peru_data_filtered$Code)
+
+# Join spatial and attribute data
+brazil_joined <- inner_join(brazil_shp, brazil_data_filtered, by = c("codigo_ibg" = "Code"))
+colombia_joined <- inner_join(colombia_shp, colombia_data_filtered, by = c("MPIO_CCNCT" = "Code"))
+peru_joined <- inner_join(peru_shp, peru_data_filtered, by = c("IDDIST" = "Code"))
+```
+
+```{r calculate_changes}
+# Calculate forest and urban adjacency changes
+forest_cols_brazil <- grep("log.Forest_Area_ha", names(brazil_joined), value = TRUE)
+forest_cols_colombia <- grep("log.Forest_Area_ha", names(colombia_joined), value = TRUE)
+forest_cols_peru <- grep("log.Forest_Area_ha", names(peru_joined), value = TRUE)
+
+urban_cols_brazil <- grep("log.Forest_Urban", names(brazil_joined), value = TRUE)
+urban_cols_colombia <- grep("log.Forest_Urban", names(colombia_joined), value = TRUE)
+urban_cols_peru <- grep("log.Forest_Urban", names(peru_joined), value = TRUE)
+
+# Forest change calculations
+brazil_joined$forest_change <- brazil_joined[[forest_cols_brazil[length(forest_cols_brazil)]]] - brazil_joined[[forest_cols_brazil[1]]]
+colombia_joined$forest_change <- colombia_joined[[forest_cols_colombia[length(forest_cols_colombia)]]] - colombia_joined[[forest_cols_colombia[1]]]
+peru_joined$forest_change <- peru_joined[[forest_cols_peru[length(forest_cols_peru)]]] - peru_joined[[forest_cols_peru[1]]]
+
+# Urban adjacency change calculations
+brazil_joined$urban_adjacency_change <- brazil_joined[[urban_cols_brazil[length(urban_cols_brazil)]]] - brazil_joined[[urban_cols_brazil[1]]]
+colombia_joined$urban_adjacency_change <- colombia_joined[[urban_cols_colombia[length(urban_cols_colombia)]]] - colombia_joined[[urban_cols_colombia[1]]]
+peru_joined$urban_adjacency_change <- peru_joined[[urban_cols_peru[length(urban_cols_peru)]]] - peru_joined[[urban_cols_peru[1]]]
+```
+
+```{r combine_amazon_data}
+# Combine all country data for Amazon Basin analysis
+common_cols <- intersect(intersect(names(brazil_joined), names(colombia_joined)), names(peru_joined))
+
+amazon_basin_data <- rbind(
+  brazil_joined %>% select(all_of(common_cols)),
+  colombia_joined %>% select(all_of(common_cols)),
+  peru_joined %>% select(all_of(common_cols))
+)
+
+# Get South America outline for map background
+sa_outline <- rnaturalearth::ne_countries(continent = "South America", returnclass = "sf")
+sa_outline_3857 <- st_transform(sa_outline, st_crs(amazon_basin_data))
+
+# Define map extent from original shapefiles
+brazil_bounds <- st_bbox(brazil_shp)
+colombia_bounds <- st_bbox(colombia_shp)
+peru_bounds <- st_bbox(peru_shp)
+
+all_bounds <- st_bbox(c(
+  xmin = min(brazil_bounds["xmin"], colombia_bounds["xmin"], peru_bounds["xmin"]),
+  xmax = max(brazil_bounds["xmax"], colombia_bounds["xmax"], peru_bounds["xmax"]),
+  ymin = min(brazil_bounds["ymin"], colombia_bounds["ymin"], peru_bounds["ymin"]),
+  ymax = max(brazil_bounds["ymax"], colombia_bounds["ymax"], peru_bounds["ymax"])
+), crs = st_crs(amazon_basin_data))
+
+sa_outline_full_extent <- st_crop(sa_outline_3857, all_bounds)
+```
+
+```{r create_amazon_maps}
+# Panel A: Cumulative Yellow Fever cases
+amazon_basin_cumulative_map <- ggplot() +
+  geom_sf(data = sa_outline_full_extent, 
+          fill = "transparent", 
+          color = "black", 
+          size = 0.3) +
+  geom_sf(data = amazon_basin_data, 
+          aes(fill = cumulative_yf), 
+          color = "white", 
+          size = 0.008) +
+  scale_fill_gradient2(
+    name = "Number of years with YF spillover",
+    low = "gray", 
+    mid = "orange", 
+    high = "red",
+    midpoint = 2,
+    labels = function(x) round(x),
+    breaks = seq(0, max(amazon_basin_data$cumulative_yf, na.rm = TRUE), by = 1)
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 16),
+    plot.title = element_text(size = 20)
+  ) +
+  labs(title = "A) Number of years with YF spillover",
+       x = "Longitude", y = "Latitude")
+
+# Panel B: Forest change
+amazon_basin_forest_map <- ggplot() +
+  geom_sf(data = sa_outline_full_extent, 
+          fill = "transparent", 
+          color = "black", 
+          size = 0.3) +
+  geom_sf(data = amazon_basin_data, 
+          aes(fill = forest_change), 
+          color = "white", 
+          size = 0.008) +
+  scale_fill_gradient2(
+    low = "red", 
+    mid = "gray", 
+    high = "green", 
+    midpoint = 0,
+    name = "Change in forested area, log(ha)",
+    labels = function(x) ifelse(x %in% c(-0.5, 0.5), sprintf("%.1f", x), as.character(round(x))),
+    breaks = c(-1, -0.5, 0, 0.5, 1)
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 16),
+    plot.title = element_text(size = 20)
+  ) +
+  labs(title = "B) Change in forested area, log(ha)",
+       x = "Longitude", y = "Latitude")
+
+# Panel C: Urban adjacency change
+amazon_basin_urban_map <- ggplot() +
+  geom_sf(data = sa_outline_full_extent, 
+          fill = "transparent", 
+          color = "black", 
+          size = 0.3) +
+  geom_sf(data = amazon_basin_data, 
+          aes(fill = urban_adjacency_change), 
+          color = "white", 
+          size = 0.008) +
+  scale_fill_gradient2(
+    low = "steelblue", 
+    mid = "gray", 
+    high = "orange", 
+    midpoint = 0,
+    name = "Change in forest-urban adjacency, log(pixels)",
+    labels = function(x) round(x),
+    breaks = pretty(range(amazon_basin_data$urban_adjacency_change, na.rm = TRUE), n = 5)
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 16),
+    plot.title = element_text(size = 20)
+  ) +
+  labs(title = "C) Change in forest-urban adjacency, log(pixels)",
+       x = "Longitude", y = "Latitude")
+```
+
+```{r create_final_figure}
+# Create the final three-panel figure
+final_three_panel_figure <- amazon_basin_cumulative_map + amazon_basin_forest_map + amazon_basin_urban_map
+
+# Display and save
+print(final_three_panel_figure)
+ggsave("figures/amazon_basin_final_3column.pdf", final_three_panel_figure, 
+        width = 24, height = 8, dpi = 300)
+```
+
+```{r create_reference_map}
+# Create South America reference map
+south_america_reference_map <- ggplot() +
+  geom_sf(data = rnaturalearth::ne_countries(continent = "South America", returnclass = "sf"), 
+          fill = "lightgray", color = "black", size = 0.3) +
+  geom_sf(data = rnaturalearth::ne_countries(country = c("Brazil", "Colombia", "Peru"), returnclass = "sf"), 
+          aes(fill = name), color = "black", size = 0.5) +
+  scale_fill_manual(
+    name = "Countries",
+    values = c("Brazil" = "#E69F00", "Colombia" = "#56B4E9", "Peru" = "#009E73")
+  ) +
+  geom_sf_text(data = rnaturalearth::ne_countries(country = c("Brazil", "Colombia", "Peru"), returnclass = "sf"), 
+               aes(label = name), size = 11, fontface = "bold") +
+  coord_sf(xlim = c(-80, -35), ylim = c(-25, 10)) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.text = element_text(size = 14),
+    axis.title = element_text(size = 16)
+  ) +
+  labs(x = "Longitude", y = "Latitude")
+
+# Display and save
+print(south_america_reference_map)
+ggsave("figures/south_america_reference_map.pdf", south_america_reference_map, 
+        width = 12, height = 10, dpi = 300)
+```
