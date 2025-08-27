@@ -23,3 +23,5 @@ The data file: "YF_final_data.csv" is the final cleaned dataset used in the anal
 12) Country: indicates whether municipality lies within Brazil, Peru or Colombia
 13) Code_unique: a concatenation of code and country that uniquely identifies municipalities
 14) Code: municipality code
+
+The "yellow_fever_manuscript.Rmd" code file contains code for making the map figures in figure 1, importing the Peru, Brazil and Colombia shapefiles contained in this repository.
